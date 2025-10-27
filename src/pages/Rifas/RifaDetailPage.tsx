@@ -2,12 +2,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { obtenerRifa } from "../../service/rifas";
-import type { Rifa } from "../../utils/types";
+import { productosDisponibles } from "../../service/productos";
+import type { Rifa, Producto } from "../../utils/types";
 import ParticipanteForm from "./ParticipanteForm";
 import { money } from "../../utils/fmt";
 import { b64ToBlobUrl } from "../../utils/b64";
-import { ArrowLeft, Tag, Ticket, BadgeCheck } from "lucide-react";
+import { ArrowLeft, Tag, Ticket, BadgeCheck, Image as ImageIcon } from "lucide-react";
 
+/* ================== Badges por estado ================== */
 function estadoBadgeClasses(estado?: string) {
   const s = String(estado || "").toUpperCase();
   if (s === "CERRADA")
@@ -19,38 +21,100 @@ function estadoBadgeClasses(estado?: string) {
   return "rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-200";
 }
 
+/* ================== Helpers ================== */
+function toUrl(b64?: string | null): string | undefined {
+  if (!b64) return undefined;
+  try {
+    return b64ToBlobUrl(b64);
+  } catch {
+    return undefined;
+  }
+}
+
+function getProductoIdFromRifa(r: any): number | undefined {
+  const embedded = r?.producto?.id;
+  if (typeof embedded === "number") return embedded;
+  const snake = r?.producto_id;
+  if (typeof snake === "number") return snake;
+  const camel = r?.productoId;
+  if (typeof camel === "number") return camel;
+  return undefined;
+}
+
+/** Galería priorizando imágenes embebidas; si no hay, usa el producto público (como en HomePage). */
+function buildImageUrls(rifa: any, productos: Producto[]): string[] {
+  const urls: string[] = [];
+
+  // 1) Galería embebida en rifa.producto.imagenes
+  const imgs = rifa?.producto?.imagenes || rifa?.product?.imagenes;
+  if (Array.isArray(imgs) && imgs.length) {
+    for (const it of imgs) {
+      const u = toUrl(it?.imagen);
+      if (u) urls.push(u);
+    }
+  }
+
+  // 2) Imagen principal embebida del producto
+  if (!urls.length) {
+    const u = toUrl(rifa?.producto?.imagen || rifa?.product?.imagen);
+    if (u) urls.push(u);
+  }
+
+  // 3) Producto público (misma lógica de HomePage)
+  if (!urls.length) {
+    const pid = getProductoIdFromRifa(rifa);
+    if (pid) {
+      const prod = productos.find((p) => p.id === pid);
+      const u = toUrl(prod?.imagen);
+      if (u) urls.push(u);
+    }
+  }
+
+  // 4) Imagen directa de la rifa
+  if (!urls.length) {
+    const u = toUrl(rifa?.imagen);
+    if (u) urls.push(u);
+  }
+
+  return urls;
+}
+
+/* ================== Página ================== */
 export default function RifaDetailPage() {
   const { id } = useParams();
   const rifaId = Number(id);
   const [rifa, setRifa] = useState<Rifa | null>(null);
+  const [productos, setProductos] = useState<Producto[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [activeIdx, setActiveIdx] = useState(0);
 
   useEffect(() => {
     if (!Number.isFinite(rifaId)) return;
-    setLoading(true);
-    setErr(null);
-    obtenerRifa(rifaId)
-      .then((r) => setRifa(r))
-      .catch((e) =>
-        setErr(e?.response?.data?.detail || "No se pudo cargar la rifa.")
-      )
-      .finally(() => setLoading(false));
+    (async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const [r, prods] = await Promise.all([
+          obtenerRifa(rifaId),
+          productosDisponibles().catch(() => [] as Producto[]),
+        ]);
+        setRifa(r);
+        setProductos(Array.isArray(prods) ? prods : []);
+      } catch (e: any) {
+        setErr(e?.response?.data?.detail || "No se pudo cargar la rifa.");
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, [rifaId]);
 
-  // Imagen (si viene de la rifa o del producto embebido)
-  const imgSrc = useMemo(() => {
-    try {
-      const raw =
-        (rifa as any)?.imagen ||
-        (rifa as any)?.producto?.imagen ||
-        (rifa as any)?.product?.imagen;
-      if (!raw) return undefined;
-      return b64ToBlobUrl(raw) || undefined;
-    } catch {
-      return undefined;
-    }
-  }, [rifa]);
+  const imageUrls = useMemo(
+    () => (rifa ? buildImageUrls(rifa as any, productos) : []),
+    [rifa, productos]
+  );
+
+  useEffect(() => setActiveIdx(0), [imageUrls.length]);
 
   if (loading && !rifa) {
     return (
@@ -87,6 +151,7 @@ export default function RifaDetailPage() {
   if (!rifa) return null;
 
   const totalNums = `${rifa.rango_min}–${rifa.rango_max}`;
+  const mainImg = imageUrls[activeIdx];
 
   return (
     <div className="space-y-8">
@@ -95,27 +160,28 @@ export default function RifaDetailPage() {
         <div className="grid grid-cols-1 md:grid-cols-3">
           {/* Imagen */}
           <div className="relative md:col-span-1">
-            {imgSrc ? (
+            {mainImg ? (
               <img
-                src={imgSrc}
-                alt={rifa.titulo}
+                src={mainImg}
+                alt={(rifa as any)?.producto?.nombre || rifa.titulo}
                 className="h-56 w-full object-cover md:h-full"
               />
             ) : (
               <div className="grid h-56 place-items-center bg-slate-50 text-slate-400 md:h-full">
-                Sin imagen
+                <div className="flex items-center gap-2 text-sm">
+                  <ImageIcon className="h-4 w-4" />
+                  Sin imagen
+                </div>
               </div>
             )}
             <div className="absolute left-3 top-3">
-              <span className={estadoBadgeClasses(rifa.estado)}>
-                {rifa.estado}
-              </span>
+              <span className={estadoBadgeClasses(rifa.estado)}>{rifa.estado}</span>
             </div>
           </div>
 
           {/* Info */}
           <div className="flex flex-col justify-between p-6 md:col-span-2">
-            <div className="space-y-2">
+            <div className="space-y-3">
               <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
                 {rifa.titulo}
               </h1>
@@ -131,6 +197,12 @@ export default function RifaDetailPage() {
                   <b className="ml-1">{money(rifa.precio_numero)}</b>
                 </span>
               </div>
+
+              {(rifa as any)?.producto?.descripcion && (
+                <p className="text-sm text-slate-600">
+                  {(rifa as any).producto.descripcion}
+                </p>
+              )}
             </div>
 
             <div className="mt-4 flex gap-2">
@@ -148,14 +220,36 @@ export default function RifaDetailPage() {
             </div>
           </div>
         </div>
+
+        {/* Miniaturas si hay varias */}
+        {imageUrls.length > 1 && (
+          <div className="border-t border-slate-200 p-3">
+            <div className="no-scrollbar flex gap-3 overflow-x-auto">
+              {imageUrls.map((u, i) => (
+                <button
+                  key={i}
+                  onClick={() => setActiveIdx(i)}
+                  className={`h-16 w-16 shrink-0 overflow-hidden rounded-lg ring-1 transition ${
+                    i === activeIdx ? "ring-slate-900" : "ring-slate-200 hover:ring-slate-300"
+                  }`}
+                  title={`Imagen ${i + 1}`}
+                  type="button"
+                >
+                  <img src={u} alt={`img-${i}`} className="h-full w-full object-cover" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Paso: formulario + grid (el formulario mostrará la grilla tras crear participante) */}
+      {/* Formulario (muestra la grilla al crear participante) */}
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="mb-4 text-lg font-semibold text-slate-900">
-          Tus datos
-        </h2>
-        <ParticipanteForm rifaId={rifaId} precioNumero={Number(rifa.precio_numero)} />
+        <h2 className="mb-4 text-lg font-semibold text-slate-900">Tus datos</h2>
+        <ParticipanteForm
+          rifaId={rifaId}
+          precioNumero={Number(rifa.precio_numero)}
+        />
       </div>
     </div>
   );
